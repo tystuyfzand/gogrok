@@ -12,7 +12,6 @@ steps:
       - wget -O /usr/bin/goc https://github.com/tystuyfzand/goc/releases/download/v0.0.1/goc_linux_amd64
       - chmod +x /usr/bin/goc
       - mkdir -p /build
-      - go mod tidy
       - go mod download
       - GOOS=linux,windows,darwin GOARCH=386,amd64,arm,arm64 goc -o /build/gogrok
   - name: package
