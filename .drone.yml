@@ -1,0 +1,70 @@
+kind: pipeline
+name: default
+
+steps:
+  - name: build
+    image: golang:latest
+    group: build
+    volumes:
+      - name: build
+        path: /build
+    commands:
+      - mkdir -p /build
+      - GOOS=linux GOARCH=386 go build -o /build/gogrok_linux_i386
+      - GOOS=linux GOARCH=amd64 go build -o /build/gogrok_linux_amd64
+      - GOOS=linux GOARCH=arm GOARM=7 go build -o /build/gogrok_linux_armv7
+      - GOOS=linux GOARCH=arm64 go build -o /build/gogrok_linux_arm64
+      - GOOS=windows GOARCH=386 go build -o /build/gogrok_windows_i386.exe
+      - GOOS=windows GOARCH=amd64 go build -o /build/gogrok_windows_amd64.exe
+      - GOOS=darwin GOARCH=arm64 go build -o /build/gogrok_macos_arm64
+      - GOOS=darwin GOARCH=amd64 go build -o /build/gogrok_macos_amd64
+  - name: package
+    image: tystuyfzand/fpm
+    commands:
+      - chmod +x scripts/build-package.sh
+      - ARCH=i386 scripts/build-package.sh
+      - ARCH=amd64 scripts/build-package.sh
+      - ARCH=armv7 scripts/build-package.sh
+      - ARCH=arm64 scripts/build-package.sh
+    volumes:
+      - name: build
+        path: /build
+    when:
+      event: tag
+  - name: release
+    image: plugins/gitea-release
+    volumes:
+      - name: build
+        path: /build
+    settings:
+      api_key:
+        from_secret: gitea_token
+      base_url: https://git.meow.tf
+      title: release
+      files:
+        - /build/gogrok_*
+      checksum:
+        - md5
+        - sha1
+        - sha256
+    environment:
+      PLUGIN_API_KEY:
+        from_secret: gitea_token
+    when:
+      event: tag
+  - name: docker
+    image: plugins/docker
+    settings:
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      repo: registry.meow.tf/gogrok
+      registry: registry.meow.tf
+      tags:
+        - latest
+    when:
+      event: tag
+volumes:
+  - name: build
+    temp: {}
