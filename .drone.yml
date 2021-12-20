@@ -10,6 +10,7 @@ steps:
         path: /build
     commands:
       - mkdir -p /build
+      - go mod download
       - GOOS=linux GOARCH=386 go build -o /build/gogrok_linux_i386
       - GOOS=linux GOARCH=amd64 go build -o /build/gogrok_linux_amd64
       - GOOS=linux GOARCH=arm GOARM=7 go build -o /build/gogrok_linux_armv7
