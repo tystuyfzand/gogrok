@@ -11,7 +11,10 @@ steps:
     commands:
       - mkdir -p /build
       - go mod download
-      - GOOS=linux,windows,darwin GOARCH=386,amd64,arm,arm64 goc -o /build/gogrok
+      - goc -o /build/gogrok
+    environment:
+      - GOOS=linux,windows,darwin
+      - GOARCH=386,amd64,arm,arm64
   - name: package
     image: tystuyfzand/fpm
     commands:
