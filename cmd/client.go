@@ -16,17 +16,13 @@ import (
 )
 
 var (
-	serverHost          string
-	clientKey           string
-	clientKeyPassphrase string
-
 	ErrNoEndpoint = errors.New("no http(s) endpoint provided")
 )
 
 func init() {
-	clientCmd.PersistentFlags().StringVar(&serverHost, "server", "localhost:2222", "Gogrok Server Address")
-	clientCmd.PersistentFlags().StringVar(&clientKey, "key", "", "Client key file")
-	clientCmd.PersistentFlags().StringVar(&clientKeyPassphrase, "passphrase", "", "Client key passphrase")
+	clientCmd.Flags().String("server", "localhost:2222", "Gogrok Server Address")
+	clientCmd.Flags().String("key", "", "Client key file")
+	clientCmd.Flags().String("passphrase", "", "Client key passphrase")
 	rootCmd.AddCommand(clientCmd)
 }
 
@@ -40,11 +36,19 @@ var clientCmd = &cobra.Command{
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
+		viper.SetDefault("gogrok.server", "localhost:2222")
+
+		setValueFromFlag(cmd.Flags(), "server", "gogrok.server", false)
+		setValueFromFlag(cmd.Flags(), "key", "gogrok.clientKey", false)
+		setValueFromFlag(cmd.Flags(), "passphrase", "gogrok.clientKeyPassphrase", false)
+
+		clientKey := viper.GetString("gogrok.clientKey")
+
 		if clientKey == "" {
 			clientKey = path.Join(viper.GetString("gogrok.storageDir"), "client.key")
 		}
 
-		key, err := common.LoadOrGenerateKey(afero.NewOsFs(), clientKey, clientKeyPassphrase)
+		key, err := common.LoadOrGenerateKey(afero.NewOsFs(), clientKey, viper.GetString("gogrok.clientKeyPassphrase"))
 
 		if err != nil {
 			log.WithError(err).Fatalln("Unable to load client key")
@@ -57,7 +61,7 @@ var clientCmd = &cobra.Command{
 		}
 
 		// Default command is client
-		c := client.New(serverHost, args[0], signer)
+		c := client.New(viper.GetString("gogrok.server"), args[0], signer)
 
 		err = c.Start()
 
