@@ -21,7 +21,7 @@ steps:
       - chmod +x scripts/build-package.sh
       - ARCH=386 scripts/build-package.sh
       - ARCH=amd64 scripts/build-package.sh
-      - ARCH=armv7 scripts/build-package.sh
+      - ARCH=arm scripts/build-package.sh
       - ARCH=arm64 scripts/build-package.sh
     volumes:
       - name: build
