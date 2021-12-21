@@ -1,10 +1,10 @@
 kind: pipeline
 name: default
+type: docker
 
 steps:
   - name: build
     image: tystuyfzand/goc:latest
-    group: build
     volumes:
       - name: build
         path: /build

@@ -11,6 +11,8 @@ import (
 	"io/ioutil"
 )
 
+// LoadOrGenerateKey generates an RSA Private Key and saves it to a file
+// passphrase can be used to (insecurely) encrypt it, though it's deprecated
 func LoadOrGenerateKey(fs afero.Fs, file, passphrase string) (*rsa.PrivateKey, error) {
 	if file == "" {
 		return GenRSA(4096)
@@ -31,10 +33,22 @@ func LoadOrGenerateKey(fs afero.Fs, file, passphrase string) (*rsa.PrivateKey, e
 			return nil, err
 		}
 
-		err = pem.Encode(f, &pem.Block{
+		defer f.Close()
+
+		pemBlock := &pem.Block{
 			Type:  "RSA PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(key),
-		})
+		}
+
+		if passphrase != "" {
+			pemBlock, err = x509.EncryptPEMBlock(rand.Reader, "RSA PRIVATE KEY", pemBlock.Bytes, []byte(passphrase), x509.PEMCipherAES128)
+
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		err = pem.Encode(f, pemBlock)
 
 		if err != nil {
 			return nil, err
