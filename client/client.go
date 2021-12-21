@@ -66,7 +66,7 @@ type Client struct {
 func (c *Client) Start() error {
 	log.WithFields(log.Fields{
 		"server": c.server,
-	}).Info("Dialing server")
+	}).Debug("Dialing server")
 
 	conn, err := ssh.Dial("tcp", c.server, c.config)
 
@@ -86,6 +86,8 @@ func (c *Client) handleHttpRequests(conn *ssh.Client) {
 		RequestedHost: "",
 	})
 
+	log.Debug("Requesting http-forward...")
+
 	success, replyData, err := conn.SendRequest("http-forward", true, payload)
 
 	if !success || err != nil {
@@ -97,7 +99,7 @@ func (c *Client) handleHttpRequests(conn *ssh.Client) {
 
 	log.WithFields(log.Fields{
 		"success": success,
-	}).Info("Got response")
+	}).Debug("Received successful response from http-forward request")
 
 	var response common.RemoteForwardSuccess
 
