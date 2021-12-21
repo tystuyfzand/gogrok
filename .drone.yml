@@ -56,8 +56,7 @@ steps:
         from_secret: docker_username
       password:
         from_secret: docker_password
-      repo: registry.meow.tf/gogrok
-      registry: registry.meow.tf
+      repo: tystuyfzand/gogrok
       tags:
         - latest
     when:
