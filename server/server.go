@@ -176,19 +176,21 @@ func (s *Server) Start() error {
 // StartHTTP is a convenience method to start a basic http server.
 // This uses s.forwardHandler if http.Handler is implemented to serve requests.
 func (s *Server) StartHTTP(bind string) error {
-	httpHandler := s.forwardHandlers["http"]
+	handler := s.forwardHandlers["http"]
 
-	if httpHandler == nil {
+	if handler == nil {
 		return errors.New("http handler not registered")
 	}
 
-	if _, ok := httpHandler.(http.Handler); !ok {
+	httpHandler, ok := handler.(http.Handler)
+
+	if !ok {
 		return errors.New("http handler cannot handle http requests")
 	}
 
 	httpServer := &http.Server{
 		Addr:    bind,
-		Handler: httpHandler.(http.Handler),
+		Handler: httpHandler,
 	}
 
 	return httpServer.ListenAndServe()
@@ -197,15 +199,17 @@ func (s *Server) StartHTTP(bind string) error {
 // ServeHTTP is a passthrough to forwardHandler's ServeHTTP
 // This can be used to use your own http server implementation, or for TLS/etc
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	httpHandler := s.forwardHandlers["http"]
+	handler := s.forwardHandlers["http"]
 
-	if httpHandler == nil {
+	if handler == nil {
 		return
 	}
 
-	if _, ok := httpHandler.(http.Handler); !ok {
+	httpHandler, ok := handler.(http.Handler)
+
+	if !ok {
 		return
 	}
 
-	httpHandler.(http.Handler).ServeHTTP(w, r)
+	httpHandler.ServeHTTP(w, r)
 }
