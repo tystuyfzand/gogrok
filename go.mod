@@ -3,6 +3,7 @@ module gogrok.ccatss.dev
 go 1.17
 
 require (
+	github.com/boltdb/bolt v1.3.1
 	github.com/gliderlabs/ssh v0.3.3
 	github.com/pkg/errors v0.9.1
 	github.com/sirupsen/logrus v1.8.1

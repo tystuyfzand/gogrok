@@ -7,6 +7,7 @@ const (
 // RemoteForwardRequest represents a forwarding request
 type RemoteForwardRequest struct {
 	RequestedHost string
+	Force         bool
 }
 
 // RemoteForwardSuccess returns when a successful request is processed
@@ -24,4 +25,14 @@ type RemoteForwardCancelRequest struct {
 type RemoteForwardChannelData struct {
 	Host     string
 	ClientIP string
+}
+
+// HostRegisterRequest is used when registering a host
+type HostRegisterRequest struct {
+	Host string
+}
+
+// HostRegisterSuccess is the response from the server for a Claim request
+type HostRegisterSuccess struct {
+	Host string
 }

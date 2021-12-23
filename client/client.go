@@ -1,197 +1,181 @@
 package client
 
 import (
-	"bufio"
-	"crypto/tls"
-	log "github.com/sirupsen/logrus"
+	"errors"
 	"gogrok.ccatss.dev/common"
 	"golang.org/x/crypto/ssh"
-	"io"
 	"net"
-	"net/http"
-	"net/textproto"
 	"net/url"
-	"strconv"
+)
+
+var (
+	ErrUnsupportedBackend = errors.New("unsupported backend type")
 )
 
 // New creates a new client with the specified server and backend
-func New(server, backend string, signer ssh.Signer) *Client {
+func New(server string, signer ssh.Signer) *Client {
+	return &Client{
+		server: server,
+		signer: signer,
+	}
+}
+
+// Client is a remote tunnel client
+type Client struct {
+	conn *ssh.Client
+
+	server string
+	signer ssh.Signer
+}
+
+// Open opens a connection to the server
+// Note: This is called automatically on client operations.
+func (c *Client) Open() error {
+	if c.conn != nil {
+		return nil
+	}
+
 	config := &ssh.ClientConfig{
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
 		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
+			ssh.PublicKeys(c.signer),
 		},
+	}
+
+	conn, err := ssh.Dial("tcp", c.server, config)
+
+	if err != nil {
+		return err
+	}
+
+	c.conn = conn
+
+	return nil
+}
+
+func (c *Client) Close() error {
+	if c.conn == nil {
+		return nil
+	}
+
+	return c.conn.Close()
+}
+
+// Start connects to the server over TCP and starts the tunnel
+func (c *Client) Start(backend, requestedHost string) (string, error) {
+	if err := c.Open(); err != nil {
+		return "", err
 	}
 
 	backendUrl, err := url.Parse(backend)
 
 	if err != nil {
-		return nil
+		return "", nil
 	}
 
 	if backendUrl.Scheme == "" {
 		backendUrl.Scheme = "http"
 	}
 
-	host, port, _ := net.SplitHostPort(backendUrl.Host)
+	if backendUrl.Scheme == "http" || backendUrl.Scheme == "https" {
+		proxy := NewHTTPProxy(backendUrl)
 
-	if port == "" {
-		port = "80"
+		return c.StartHTTPForwarding(proxy, requestedHost)
 	}
 
-	dialHost := net.JoinHostPort(host, port)
+	return "", ErrUnsupportedBackend
+}
 
-	return &Client{
-		config:     config,
-		server:     server,
-		backendUrl: backendUrl,
-		dialHost:   dialHost,
-		tlsConfig:  &tls.Config{ServerName: host, InsecureSkipVerify: true},
+// Register a host as reserved with the server
+func (c *Client) Register(host string) error {
+	if err := c.Open(); err != nil {
+		return err
 	}
-}
 
-// Client is a remote tunnel client
-type Client struct {
-	config    *ssh.ClientConfig
-	tlsConfig *tls.Config
+	payload := ssh.Marshal(common.HostRegisterRequest{
+		Host: host,
+	})
 
-	server     string
-	backendUrl *url.URL
-	dialHost   string
-}
-
-// Start connects to the server over TCP and starts the tunnel
-func (c *Client) Start() error {
-	log.WithFields(log.Fields{
-		"server": c.server,
-	}).Debug("Dialing server")
-
-	conn, err := ssh.Dial("tcp", c.server, c.config)
+	success, replyData, err := c.conn.SendRequest(common.HttpRegisterHost, true, payload)
 
 	if err != nil {
 		return err
 	}
 
-	if c.backendUrl.Scheme == "http" || c.backendUrl.Scheme == "https" {
-		go c.handleHttpRequests(conn)
+	if !success {
+		return errors.New(string(replyData))
+	}
+
+	var res common.HostRegisterSuccess
+
+	if err = ssh.Unmarshal(replyData, &res); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (c *Client) handleHttpRequests(conn *ssh.Client) {
-	payload := ssh.Marshal(common.RemoteForwardRequest{
-		RequestedHost: "",
-	})
-
-	log.Debug("Requesting http-forward...")
-
-	success, replyData, err := conn.SendRequest("http-forward", true, payload)
-
-	if !success || err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"message": string(replyData),
-		}).Fatalln("Unable to start forwarding")
+// Unregister a reserved host with the server
+func (c *Client) Unregister(host string) error {
+	if err := c.Open(); err != nil {
+		return err
 	}
 
-	log.WithFields(log.Fields{
-		"success": success,
-	}).Debug("Received successful response from http-forward request")
+	payload := ssh.Marshal(common.HostRegisterRequest{
+		Host: host,
+	})
+
+	success, replyData, err := c.conn.SendRequest(common.HttpUnregisterHost, true, payload)
+
+	if err != nil {
+		return err
+	}
+
+	if !success {
+		return errors.New(string(replyData))
+	}
+
+	var res common.HostRegisterSuccess
+
+	if err = ssh.Unmarshal(replyData, &res); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// StartHTTPForwarding starts a basic http proxy/forwarding service
+func (c *Client) StartHTTPForwarding(proxy *HTTPProxy, requestedHost string) (string, error) {
+	payload := ssh.Marshal(common.RemoteForwardRequest{
+		RequestedHost: requestedHost,
+	})
+
+	success, replyData, err := c.conn.SendRequest(common.HttpForward, true, payload)
+
+	if err != nil {
+		return "", err
+	}
+
+	if !success {
+		return "", errors.New(string(replyData))
+	}
 
 	var response common.RemoteForwardSuccess
 
 	if err := ssh.Unmarshal(replyData, &response); err != nil {
-		log.WithError(err).Fatalln("Unable to unmarshal data")
+		return "", err
 	}
 
-	defer func() {
+	ch := c.conn.HandleChannelOpen(common.ForwardedHTTPChannelType)
+
+	go func() {
+		proxy.acceptConnections(ch)
+
 		payload := ssh.Marshal(common.RemoteForwardCancelRequest{Host: response.Host})
-		conn.SendRequest("cancel-http-forward", false, payload)
+		c.conn.SendRequest(common.CancelHttpForward, false, payload)
 	}()
 
-	log.WithField("host", response.Host).Info("Bound host")
-
-	ch := conn.HandleChannelOpen(common.ForwardedHTTPChannelType)
-
-	for {
-		newCh := <-ch
-
-		if newCh == nil {
-			break
-		}
-
-		ch, r, err := newCh.Accept()
-
-		if err != nil {
-			log.WithError(err).Warning("Error accepting channel")
-			continue
-		}
-
-		go ssh.DiscardRequests(r)
-
-		go c.proxyRequest(ch)
-	}
-}
-
-// proxyRequest handles a request from the ssh channel and forwards it to the local http server
-func (c *Client) proxyRequest(rw io.ReadWriteCloser) {
-	tcpConn, err := net.Dial("tcp", c.dialHost)
-
-	if err != nil {
-		rw.Close()
-		return
-	}
-
-	if c.backendUrl.Scheme == "https" || c.backendUrl.Scheme == "wss" {
-		// Wrap with TLS
-		tcpConn = tls.Client(tcpConn, c.tlsConfig)
-	}
-
-	defer rw.Close()
-	defer tcpConn.Close()
-
-	bufferedCh := bufio.NewReader(rw)
-
-	tp := textproto.NewReader(bufferedCh)
-
-	var s string
-	if s, err = tp.ReadLine(); err != nil {
-		return
-	}
-
-	// Write the first response line as-is
-	tcpConn.Write([]byte(s + "\r\n"))
-
-	// Read headers and proxy each to the output
-	mimeHeader, err := tp.ReadMIMEHeader()
-
-	if err != nil {
-		return
-	}
-
-	// Modify and return our headers
-	headers := http.Header(mimeHeader)
-	headers.Set("Host", c.backendUrl.Host)
-	headers.Write(tcpConn)
-
-	// End headers
-	tcpConn.Write([]byte("\r\n"))
-
-	contentLength, err := strconv.ParseInt(headers.Get("Content-Length"), 10, 64)
-
-	if err == nil && contentLength > 0 {
-		// Copy request to the tcpConn
-		_, err := io.Copy(tcpConn, io.LimitReader(bufferedCh, int64(contentLength)))
-
-		if err != nil {
-			log.WithError(err).Warning("Connection error on body read, closing")
-			return
-		}
-	}
-
-	// Copy the response back to the tunnel server
-	io.Copy(rw, tcpConn)
+	return response.Host, nil
 }

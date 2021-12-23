@@ -30,6 +30,8 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
+	rootCmd.Flags().String("key", "", "Server/Client key file")
+	rootCmd.Flags().String("passphrase", "", "Server/Client key passphrase")
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.gogrok.yaml)")
 	rootCmd.PersistentFlags().Bool("viper", true, "use Viper for configuration")
 	viper.BindPFlag("useViper", rootCmd.PersistentFlags().Lookup("viper"))

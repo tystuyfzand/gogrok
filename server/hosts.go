@@ -38,7 +38,58 @@ func RandomAnimal() string {
 	return animals[rand.Intn(len(animals))]
 }
 
+// Animals returns the animal slice
+func Animals() []string {
+	return animals
+}
+
 // DenyAll is a HostValidator to deny all custom requests
 func DenyAll(host string) bool {
 	return false
+}
+
+// DenyPrefixIn denies hosts in slice s
+func DenyPrefixIn(s []string) HostValidator {
+	return func(host string) bool {
+		idx := strings.Index(host, ".")
+
+		if idx != -1 {
+			host = host[0:idx]
+		}
+
+		for _, val := range s {
+			if val == host {
+				return false
+			}
+		}
+
+		return true
+	}
+}
+
+// SuffixIn checks hosts for a suffix value
+// Note: Suffix is automatically prepended with .
+func SuffixIn(s []string) HostValidator {
+	return func(host string) bool {
+		for _, val := range s {
+			if strings.HasSuffix(host, "."+val) {
+				return true
+			}
+		}
+
+		return false
+	}
+}
+
+// ValidateMulti checks all specified validators before denying hosts
+func ValidateMulti(validators ...HostValidator) HostValidator {
+	return func(host string) bool {
+		for _, validator := range validators {
+			if !validator(host) {
+				return false
+			}
+		}
+
+		return true
+	}
 }

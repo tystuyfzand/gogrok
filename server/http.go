@@ -2,16 +2,20 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"github.com/gliderlabs/ssh"
 	log "github.com/sirupsen/logrus"
 	"gogrok.ccatss.dev/common"
+	"gogrok.ccatss.dev/server/store"
 	gossh "golang.org/x/crypto/ssh"
 	"io"
+	"net"
 	"net/http"
 	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // HostProvider is a func to provide a host + subdomain
@@ -24,10 +28,17 @@ type HostValidator func(host string) bool
 // adding the HandleSSHRequest callback to the server's RequestHandlers under
 // tcpip-forward and cancel-tcpip-forward.
 type ForwardedHTTPHandler struct {
-	forwards  map[string]*gossh.ServerConn
+	forwards  map[string]*Forward
 	provider  HostProvider
 	validator HostValidator
+	store     store.Store
 	sync.RWMutex
+}
+
+// Forward contains the forwarded connection
+type Forward struct {
+	Conn *gossh.ServerConn
+	Key  ssh.PublicKey
 }
 
 // HandlerOption represents a func used to assign options to a ForwardedHTTPHandler
@@ -47,9 +58,16 @@ func WithValidator(validator HostValidator) HandlerOption {
 	}
 }
 
+// WithStore assigns a host store to use for storage
+func WithStore(s store.Store) HandlerOption {
+	return func(h *ForwardedHTTPHandler) {
+		h.store = s
+	}
+}
+
 func NewHttpHandler(opts ...HandlerOption) ForwardHandler {
 	h := &ForwardedHTTPHandler{
-		forwards:  make(map[string]*gossh.ServerConn),
+		forwards:  make(map[string]*Forward),
 		provider:  RandomAnimal,
 		validator: DenyAll,
 	}
@@ -61,15 +79,26 @@ func NewHttpHandler(opts ...HandlerOption) ForwardHandler {
 	return h
 }
 
+// RequestTypes lets the server know which request types this handler can use
+func (h *ForwardedHTTPHandler) RequestTypes() []string {
+	return []string{
+		common.HttpForward,
+		common.CancelHttpForward,
+		common.HttpRegisterHost,
+		common.HttpUnregisterHost,
+	}
+}
+
 // ServeHTTP mocks an http server endpoint that uses Request.Host to forward requests
 func (h *ForwardedHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.RLock()
-	sshConn, ok := h.forwards[r.Host]
+	fw, ok := h.forwards[r.Host]
 	h.RUnlock()
 
 	if !ok {
 		log.Warning("Unknown host ", r.Host)
 		http.Error(w, "not found", http.StatusNotFound)
+		log.Println("Valid hosts:", h.forwards)
 		return
 	}
 
@@ -78,7 +107,7 @@ func (h *ForwardedHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		ClientIP: r.RemoteAddr,
 	})
 
-	ch, reqs, err := sshConn.OpenChannel(common.ForwardedHTTPChannelType, payload)
+	ch, reqs, err := fw.Conn.OpenChannel(common.ForwardedHTTPChannelType, payload)
 
 	if err != nil {
 		log.WithError(err).Warning("Unable to open ssh connection channel")
@@ -162,84 +191,230 @@ func parseResponseLine(line string) (httpVersion, responseCode, responseText str
 	return line[:s1], line[s1+1 : s2], line[s2+1:], true
 }
 
+func (h *ForwardedHTTPHandler) checkHostOwnership(host, owner string) bool {
+	hostModel, err := h.store.Get(host)
+
+	if err != nil {
+		return false
+	}
+
+	return hostModel.Owner == owner
+}
+
 // HandleSSHRequest handles incoming ssh requests.
 func (h *ForwardedHTTPHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
 
+	log.WithField("type", req.Type).Info("Handling request")
+
 	switch req.Type {
-	case "http-forward":
-		var reqPayload common.RemoteForwardRequest
-		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			// TODO: log parse failure
-			log.WithError(err).Warning("Error parsing payload for http-forward")
-			return false, []byte{}
-		}
+	case common.HttpForward:
+		return h.handleForwardRequest(ctx, conn, req)
+	case common.CancelHttpForward:
+		return h.handleCancelRequest(ctx, req)
+	case common.HttpRegisterHost:
+		return h.handleRegisterRequest(ctx, conn, req)
+	case common.HttpUnregisterHost:
+		return h.handleUnregisterRequest(ctx, req)
+	default:
+		return false, nil
+	}
+}
 
-		host := reqPayload.RequestedHost
+func (h *ForwardedHTTPHandler) handleForwardRequest(ctx ssh.Context, conn *gossh.ServerConn, req *gossh.Request) (bool, []byte) {
+	var reqPayload common.RemoteForwardRequest
+	if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
+		log.WithError(err).Warning("Error parsing payload for http-forward")
+		return false, []byte{}
+	}
 
-		if host != "" && h.validator != nil && !h.validator(host) {
+	pubKey := ctx.Value("publicKey").(ssh.PublicKey)
+
+	keyStr := string(bytes.TrimSpace(gossh.MarshalAuthorizedKey(pubKey)))
+
+	host := strings.ToLower(reqPayload.RequestedHost)
+
+	if host != "" {
+		if h.validator != nil && !h.validator(host) {
 			return false, []byte("invalid host " + host)
 		}
 
-		// Validate host
-		if host == "" {
-			host = h.provider()
+		hostModel, err := h.store.Get(host)
+
+		if hostModel == nil || err != nil {
+			return false, []byte("host not registered")
+		}
+
+		if hostModel.Owner != keyStr {
+			return false, []byte("host claimed and not owned by current key")
 		}
 
 		h.RLock()
+		current, exists := h.forwards[host]
+		h.RUnlock()
+
+		if exists && !reqPayload.Force {
+			return false, []byte("host already in use and force not set")
+		}
+
+		if exists {
+			// Force old connection to close
+			current.Conn.Close()
+		}
+
+		hostModel.LastUse = time.Now()
+
+		// Save model last use time
+		h.store.Add(*hostModel)
+	} else {
+		host = h.provider()
+	}
+
+	// Validate host
+	if host == "" {
+		h.RLock()
 		for {
+			host = h.provider()
+
 			_, exists := h.forwards[host]
 
 			if !exists {
 				break
 			}
-
-			host = h.provider()
 		}
 		h.RUnlock()
-
-		h.Lock()
-		h.forwards[host] = conn
-		h.Unlock()
-		log.WithField("host", host).Info("Registered host")
-
-		go func() {
-			<-ctx.Done()
-
-			log.WithField("host", host).Info("Removed host")
-			h.Lock()
-			delete(h.forwards, host)
-			h.Unlock()
-		}()
-
-		return true, gossh.Marshal(&common.RemoteForwardSuccess{
-			Host: host,
-		})
-
-	case "cancel-http-forward":
-		var reqPayload common.RemoteForwardCancelRequest
-		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			// TODO: log parse failure
-			return false, []byte{}
-		}
-		h.Lock()
-		delete(h.forwards, reqPayload.Host)
-		h.Unlock()
-		return true, nil
-
-	case "http-register-forward":
-		var reqPayload common.RemoteForwardRequest
-		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			// TODO: log parse failure
-			log.WithError(err).Warning("Error parsing payload for http-register-forward")
-			return false, []byte{}
-		}
-
-		log.Println("Key:", ctx.Value("publicKey"))
-
-		// Claimed forward via SSH Public Key
-		return true, nil
-	default:
-		return false, nil
 	}
+
+	log.WithField("host", host).Info("Registering host")
+
+	h.Lock()
+	h.forwards[host] = &Forward{
+		Conn: conn,
+		Key:  pubKey,
+	}
+	h.Unlock()
+
+	log.WithField("host", host).Info("Registered host")
+
+	go func() {
+		<-ctx.Done()
+
+		log.WithField("host", host).Info("Removed host")
+		h.Lock()
+		delete(h.forwards, host)
+		h.Unlock()
+	}()
+
+	return true, gossh.Marshal(&common.RemoteForwardSuccess{
+		Host: host,
+	})
+}
+
+func (h *ForwardedHTTPHandler) handleCancelRequest(ctx ssh.Context, req *gossh.Request) (bool, []byte) {
+	var reqPayload common.RemoteForwardCancelRequest
+	if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
+		log.WithError(err).Warning("Error parsing payload for cancel-http-forward")
+		return false, []byte{}
+	}
+
+	pubKey := ctx.Value("publicKey").(ssh.PublicKey)
+
+	host := strings.ToLower(reqPayload.Host)
+
+	h.RLock()
+	fw, exists := h.forwards[host]
+	h.RUnlock()
+
+	if !exists {
+		return false, []byte("host not found")
+	}
+
+	if !bytes.Equal(pubKey.Marshal(), fw.Key.Marshal()) {
+		return false, []byte("host not owned by key")
+	}
+
+	log.WithField("host", host).Info("Unregistering host")
+
+	h.Lock()
+	delete(h.forwards, host)
+	h.Unlock()
+	return true, nil
+}
+
+func (h *ForwardedHTTPHandler) handleRegisterRequest(ctx ssh.Context, conn *gossh.ServerConn, req *gossh.Request) (bool, []byte) {
+	var reqPayload common.HostRegisterRequest
+	if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
+		log.WithError(err).Warning("Error parsing payload for http-register-forward")
+		return false, []byte{}
+	}
+
+	pubKey := ctx.Value("publicKey").(ssh.PublicKey)
+
+	keyStr := string(bytes.TrimSpace(gossh.MarshalAuthorizedKey(pubKey)))
+
+	host := strings.ToLower(reqPayload.Host)
+
+	if host == "" || h.validator != nil && !h.validator(host) {
+		log.WithField("host", host).Warning("Host failed validation")
+		return false, []byte("invalid host " + host)
+	}
+
+	if h.store.Has(host) {
+		log.WithField("host", host).Warning("Host is already taken")
+		return false, []byte("host is already taken")
+	}
+
+	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+
+	log.WithField("ip", ip).WithField("host", host).Info("Registering host")
+
+	err := h.store.Add(store.Host{
+		Host:    host,
+		Owner:   keyStr,
+		IP:      ip,
+		Created: time.Now(),
+		LastUse: time.Now(),
+	})
+
+	if err != nil {
+		return false, []byte(err.Error())
+	}
+
+	return true, gossh.Marshal(common.HostRegisterSuccess{
+		Host: host,
+	})
+}
+
+func (h *ForwardedHTTPHandler) handleUnregisterRequest(ctx ssh.Context, req *gossh.Request) (bool, []byte) {
+	var reqPayload common.HostRegisterRequest
+	if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
+		log.WithError(err).Warning("Error parsing payload for http-register-forward")
+		return false, []byte{}
+	}
+
+	pubKey := ctx.Value("publicKey").(ssh.PublicKey)
+
+	keyStr := string(bytes.TrimSpace(gossh.MarshalAuthorizedKey(pubKey)))
+
+	host := strings.ToLower(reqPayload.Host)
+
+	if host == "" || h.validator != nil && !h.validator(host) {
+		return false, []byte("invalid host " + host)
+	}
+
+	hostModel, err := h.store.Get(host)
+
+	if hostModel == nil || err != nil {
+		return false, []byte(err.Error())
+	}
+
+	if hostModel.Owner != keyStr {
+		return false, []byte("this host is not owned by you")
+	}
+
+	h.store.Remove(host)
+
+	return true, gossh.Marshal(common.HostRegisterSuccess{
+		Host: host,
+	})
 }

@@ -15,12 +15,13 @@ import (
 // ForwardHandler is an interface defining the handler type for forwarding
 type ForwardHandler interface {
 	HandleSSHRequest(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte)
+	RequestTypes() []string
 }
 
 // Server is a struct containing our ssh server, forwarding handler, and other attributes
 type Server struct {
-	sshServer      *ssh.Server
-	forwardHandler ForwardHandler
+	sshServer       *ssh.Server
+	forwardHandlers map[string]ForwardHandler
 
 	sshBindAddress string
 	hostSigners    []ssh.Signer
@@ -33,9 +34,9 @@ type Option func(s *Server)
 
 // WithForwardHandler lets custom forwarding handlers be registered.
 // This will support multiple handlers eventually, for HTTP, TCP, etc.
-func WithForwardHandler(f ForwardHandler) Option {
+func WithForwardHandler(protocol string, handler ForwardHandler) Option {
 	return func(s *Server) {
-		s.forwardHandler = f
+		s.forwardHandlers[protocol] = handler
 	}
 }
 
@@ -76,14 +77,18 @@ func WithAuthorizedKeys(authorizedKeys []string) Option {
 
 // New creates a new Server instance with a range of options.
 func New(options ...Option) (*Server, error) {
-	s := &Server{}
+	s := &Server{
+		forwardHandlers: make(map[string]ForwardHandler),
+	}
 
 	for _, opt := range options {
 		opt(s)
 	}
 
-	if s.forwardHandler == nil {
-		s.forwardHandler = NewHttpHandler(WithProvider(RandomAnimal))
+	if len(s.forwardHandlers) == 0 {
+		httpHandler := NewHttpHandler(WithProvider(RandomAnimal))
+
+		s.forwardHandlers["http"] = httpHandler
 	}
 
 	if s.hostSigners == nil || len(s.hostSigners) < 1 {
@@ -106,9 +111,10 @@ func New(options ...Option) (*Server, error) {
 
 	// TODO: Add TCP handler using the same idea, potentially support multiple forwardHandlers
 
-	if _, ok := s.forwardHandler.(http.Handler); ok {
-		requestHandlers["http-forward"] = s.forwardHandler.HandleSSHRequest
-		requestHandlers["cancel-http-forward"] = s.forwardHandler.HandleSSHRequest
+	for _, handler := range s.forwardHandlers {
+		for _, requestType := range handler.RequestTypes() {
+			requestHandlers[requestType] = handler.HandleSSHRequest
+		}
 	}
 
 	s.sshServer = &ssh.Server{
@@ -170,22 +176,36 @@ func (s *Server) Start() error {
 // StartHTTP is a convenience method to start a basic http server.
 // This uses s.forwardHandler if http.Handler is implemented to serve requests.
 func (s *Server) StartHTTP(bind string) error {
-	if h, ok := s.forwardHandler.(http.Handler); ok {
-		httpServer := &http.Server{
-			Addr:    bind,
-			Handler: h,
-		}
+	httpHandler := s.forwardHandlers["http"]
 
-		return httpServer.ListenAndServe()
+	if httpHandler == nil {
+		return errors.New("http handler not registered")
 	}
 
-	return errors.New("forwarding handler doesn't support http")
+	if _, ok := httpHandler.(http.Handler); !ok {
+		return errors.New("http handler cannot handle http requests")
+	}
+
+	httpServer := &http.Server{
+		Addr:    bind,
+		Handler: httpHandler.(http.Handler),
+	}
+
+	return httpServer.ListenAndServe()
 }
 
 // ServeHTTP is a passthrough to forwardHandler's ServeHTTP
 // This can be used to use your own http server implementation, or for TLS/etc
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h, ok := s.forwardHandler.(http.Handler); ok {
-		h.ServeHTTP(w, r)
+	httpHandler := s.forwardHandlers["http"]
+
+	if httpHandler == nil {
+		return
 	}
+
+	if _, ok := httpHandler.(http.Handler); !ok {
+		return
+	}
+
+	httpHandler.(http.Handler).ServeHTTP(w, r)
 }

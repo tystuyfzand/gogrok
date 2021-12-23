@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 	"gogrok.ccatss.dev/common"
 	"gogrok.ccatss.dev/server"
+	"gogrok.ccatss.dev/server/store"
 	gossh "golang.org/x/crypto/ssh"
 	"math/rand"
 	"path"
@@ -22,6 +23,7 @@ func init() {
 	serveCmd.Flags().String("http", ":8080", "HTTP Server Bind Address")
 	serveCmd.Flags().String("keys", "", "Authorized keys file to control access")
 	serveCmd.Flags().StringSlice("domains", nil, "Domains to use for ")
+	serveCmd.Flags().String("store", "", "Store file to use when allowing host registration")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -38,6 +40,7 @@ var serveCmd = &cobra.Command{
 		setValueFromFlag(cmd.Flags(), "http", "gogrok.httpAddress", false)
 		setValueFromFlag(cmd.Flags(), "keys", "gogrok.authorizedKeyFile", false)
 		setValueFromFlag(cmd.Flags(), "domains", "gogrok.domains", false)
+		setValueFromFlag(cmd.Flags(), "store", "gogrok.store", false)
 
 		key, err := common.LoadOrGenerateKey(baseFs, path.Join(viper.GetString("gogrok.storageDir"), "server.key"), "")
 
@@ -70,16 +73,56 @@ var serveCmd = &cobra.Command{
 			}
 
 			opts = append(opts, server.WithAuthorizedKeys(authorizedKeys))
+
+			log.WithField("keyFile", authorizedKeysFile).Info("Authorizing public keys on connection")
 		}
+
+		handlerOpts := make([]server.HandlerOption, 0)
 
 		if domains := viper.GetStringSlice("gogrok.domains"); domains != nil {
 			generator := func() string {
 				return server.RandomAnimal() + "." + domains[rand.Intn(len(domains))]
 			}
 
-			handler := server.NewHttpHandler(server.WithProvider(generator))
+			validator := server.ValidateMulti(server.DenyPrefixIn(server.Animals()), server.SuffixIn(domains))
 
-			opts = append(opts, server.WithForwardHandler(handler))
+			handlerOpts = append(handlerOpts, server.WithProvider(generator), server.WithValidator(validator))
+
+			log.WithField("domains", domains).Info("Registered domains for random use")
+		}
+
+		if storeUri := viper.GetString("gogrok.store"); storeUri != "" {
+			driver := "bolt"
+
+			if idx := strings.Index(storeUri, "://"); idx != -1 {
+				driver = storeUri[0:idx]
+				storeUri = storeUri[idx+3:]
+			}
+
+			var s store.Store
+
+			switch driver {
+			case "bolt":
+				fallthrough
+			default:
+				log.WithField("path", storeUri).Info("Using bolt store")
+				s, err = store.NewBoltStore(storeUri)
+			}
+
+			if err != nil {
+				log.WithError(err).Fatalln("Unable to create data store")
+				return
+			}
+
+			log.WithField("driver", driver).Info("Host store set, registration enabled")
+
+			handlerOpts = append(handlerOpts, server.WithStore(s))
+		}
+
+		if len(handlerOpts) > 0 {
+			handler := server.NewHttpHandler(handlerOpts...)
+
+			opts = append(opts, server.WithForwardHandler("http", handler))
 		}
 
 		s, err := server.New(opts...)

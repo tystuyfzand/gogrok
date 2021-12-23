@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -21,9 +22,38 @@ var (
 
 func init() {
 	clientCmd.Flags().String("server", "localhost:2222", "Gogrok Server Address")
-	clientCmd.Flags().String("key", "", "Client key file")
-	clientCmd.Flags().String("passphrase", "", "Client key passphrase")
+	clientCmd.Flags().String("host", "", "Requested host to register")
 	rootCmd.AddCommand(clientCmd)
+}
+
+func clientPreRun(cmd *cobra.Command, args []string) {
+	viper.SetDefault("gogrok.server", "localhost:2222")
+
+	setValueFromFlag(cmd.Flags(), "server", "gogrok.server", false)
+	setValueFromFlag(cmd.Flags(), "key", "gogrok.clientKey", false)
+	setValueFromFlag(cmd.Flags(), "passphrase", "gogrok.clientKeyPassphrase", false)
+}
+
+func loadClientKey() ssh.Signer {
+	clientKey := viper.GetString("gogrok.clientKey")
+
+	if clientKey == "" {
+		clientKey = path.Join(viper.GetString("gogrok.storageDir"), "client.key")
+	}
+
+	key, err := common.LoadOrGenerateKey(afero.NewOsFs(), clientKey, viper.GetString("gogrok.clientKeyPassphrase"))
+
+	if err != nil {
+		log.WithError(err).Fatalln("Unable to load client key")
+	}
+
+	signer, err := ssh.NewSignerFromKey(key)
+
+	if err != nil {
+		log.WithError(err).Fatalln("Unable to create signer from client key")
+	}
+
+	return signer
 }
 
 var clientCmd = &cobra.Command{
@@ -35,39 +65,25 @@ var clientCmd = &cobra.Command{
 		}
 		return nil
 	},
+	PreRun: clientPreRun,
 	Run: func(cmd *cobra.Command, args []string) {
-		viper.SetDefault("gogrok.server", "localhost:2222")
+		setValueFromFlag(cmd.Flags(), "host", "gogrok.clientHost", false)
 
-		setValueFromFlag(cmd.Flags(), "server", "gogrok.server", false)
-		setValueFromFlag(cmd.Flags(), "key", "gogrok.clientKey", false)
-		setValueFromFlag(cmd.Flags(), "passphrase", "gogrok.clientKeyPassphrase", false)
+		c := client.New(viper.GetString("gogrok.server"), loadClientKey())
 
-		clientKey := viper.GetString("gogrok.clientKey")
-
-		if clientKey == "" {
-			clientKey = path.Join(viper.GetString("gogrok.storageDir"), "client.key")
-		}
-
-		key, err := common.LoadOrGenerateKey(afero.NewOsFs(), clientKey, viper.GetString("gogrok.clientKeyPassphrase"))
+		host, err := c.Start(args[0], viper.GetString("gogrok.clientHost"))
 
 		if err != nil {
-			log.WithError(err).Fatalln("Unable to load client key")
+			fmt.Fprintln(os.Stderr, "Unable to start server: "+err.Error())
+			os.Exit(1)
 		}
 
-		signer, err := ssh.NewSignerFromKey(key)
+		cmd.Println("Successfully bound host and started proxy")
+		log.WithField("host", host).Info("Successfully bound host and started proxy")
 
-		if err != nil {
-			log.WithError(err).Fatalln("Unable to create signer from client key")
-		}
-
-		// Default command is client
-		c := client.New(viper.GetString("gogrok.server"), args[0], signer)
-
-		err = c.Start()
-
-		if err != nil {
-			log.WithError(err).Fatalln("Unable to connect to server")
-		}
+		cmd.Println("Endpoints:")
+		cmd.Printf("http://%s\n", host)
+		cmd.Printf("https://%s\n", host)
 
 		sig := make(chan os.Signal)
 

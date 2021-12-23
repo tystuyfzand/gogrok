@@ -6,6 +6,15 @@ A simple, easy to use ngrok alternative (self hosted!)
 
 The server and client can also be easily embedded into your applications, see the 'server' and 'client' directories.
 
+Features
+--------
+
+* HTTP and HTTPS handling
+* Public key authentication
+* Authorized key whitelists
+* Registration of reserved hosts
+* Forwarding system that allows easy additions of other protocols (Coming soon: TCP and TCP+TLS, with host-based TLS support)
+
 Example usage
 -------------
 
@@ -82,3 +91,12 @@ services:
     - GOGROK_DOMAINS=gogrok.ccatss.dev
     - GOGROK_AUTHORIZED_KEY_FILE=/config/authorized_keys
 ```
+
+Host Registration
+-----------------
+
+Gogrok lets you register your own custom hosts that are attached to your public key.
+
+On the server, make sure to run the server with the flag `--store=PATH_TO_DB.db`
+
+Use `gogrok register` and `gogrok unregister` to manage registered hosts to your client key.
