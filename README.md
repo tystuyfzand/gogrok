@@ -26,7 +26,7 @@ Server:
 
 Client:
 
-`gogrok --server=localhost:2222 http://localhost:3000`
+`gogrok client --server=localhost:2222 http://localhost:3000`
 
 Server
 ------
